@@ -1,0 +1,179 @@
+format long
+rng('default')                               %%随机数种子恒定random seed is constant
+clear;clc;close all
+tic;
+prompt = {'Enter small sample data, remember to separate with spaces！','bootstrap数据集数量','显著性水平',...
+    '可靠度','蒙特卡洛循环次数','蒙特卡洛单次循环抽样次数','输入工况参数，记得用空格隔开呦！','转速','实验径向力','基本额定动载荷'};
+dlg_title = '请输入';
+dims = [1 85];
+definput= {'42.3 41.6 6.183 25.25 1.9'...
+    ,'10000','0.05','0.9','10000','1000'...
+    ,'6000 7000 8000 9000 10000 11000 12000 13000 14000 15000 16000','2400','10000','12820'};
+answer = inputdlg(prompt, dlg_title, dims, definput);
+
+life = str2double(strsplit(answer{1}));
+nboot = str2double(answer{2});
+alpha = str2double(answer{3});
+r = str2double(answer{4});
+n = str2double(answer{5});
+m = str2double(answer{6});
+Pset = str2double(strsplit(answer{7}));
+rotate = str2double(answer{8});
+Fr = str2double(answer{9});
+LRD = str2double(answer{10});
+
+%%输入5个来自LDK_3滚动轴承失效数据----------------------
+%【life=[42.3 41.6 6.183 25.25 1.9]】
+
+LIFE=sort(life);                             %%做排序处理
+%【nboot=10000;】                                 %%bootstrap数据集数量
+stats = bootstrp(nboot,@(x)[wblfit(x)],LIFE);%%bootstrap重抽样
+
+%区间估计-----------------------------------------------------
+%【alpha=0.05;】                                  %%Significance level显著性水平 *1-alpha=confidence level置信水平
+CI=bootci(nboot,{@(x)[wblfit(x)],LIFE},'alpha',alpha);     
+fprintf('%.2f%% confidence interval of Scale parameter_a：[%f, %f]\n',(1-alpha)*100, CI(1), CI(2));  
+fprintf('%.2f%% confidence interval of Shape parameter_B：[%f, %f]\n',(1-alpha)*100, CI(3), CI(4));
+
+%点估计-------------------------------------------------------
+average_a=mean(stats(:,1));                   %%对第一列取平均值
+infIndices=isinf(stats(:, 2));                %找到第二列中的inf值的索引
+stats(infIndices, :) = [];                    %使用逻辑索引删除inf值
+average_B = mean(stats(:, 2));                %计算剩余数据的均值
+
+fprintf('尺度参数a的bootstrap点估计为：%f\n',average_a);
+fprintf('形状参数B的bootstrap点估计为：%f\n',average_B);
+
+figure('Name','a尺度参数估计值分布直方图')
+histogram(stats(:,1),'DisplayStyle', 'bar','edgecolor', 'b')
+xlabel('各数据集尺度参数估计值');ylabel('数量');
+
+figure('Name','B形状参数估计值分布直方图')
+histogram(stats(:,2),'DisplayStyle', 'bar','edgecolor', 'g')
+xlabel('各数据集形状参数估计值');ylabel('数量');
+
+
+%%绘制R函数----------------------------------------------------
+alpha=average_a;                %%尺度参数
+gamma=average_B;                %%形状参数
+time=0:1:50;
+fR=exp(-(time./alpha).^gamma);  %%R函数公式
+figure('Name','基于Bootstrap估参的R函数','Position', [100 100 500 340])
+plot(time,fR,'linewidth',4.5,'color', 'blue');
+legend('可靠度函数');
+xlabel('小时');ylabel('可靠度');
+ax=gca;
+ax.Box='on';grid on;
+ax.LineWidth=3.5;  %Set the border thickness to X
+% Increase the font size of the axis tick labels
+ax.FontSize = 16;  % Set the desired font size
+
+%%已知可靠度求解寿命-------------------------------------------
+%%gamma=round(gamma,6);                      %%保留小数位
+%%alpha=round(alpha,6);
+%【r=0.9;】                                   %%可靠度为90%
+fR=@(x)exp(-(x./alpha).^gamma)-r;
+t=fsolve(fR,2);                               %%寿命为小时，*迭代求解初始值应靠近结果
+T=t*60*rotate/10^6;                           %%寿命为转数(106r)，1900为实验条件下的转速r/min
+fprintf('bootstrap算法--可靠度为%.2f%%时，轴承寿命为：%.6f小时,或%.6f转（10^6r）\n',r*100,t,T);
+
+%%求基本额定动载荷---------------------------------------------
+C3=T*(Fr)^3;                                  %%基本额定动载荷的三次方
+C=C3^(1/3);                                   %%基于bootstrap算法的基本额定动载荷
+fprintf('bootstrap算法--基本额定动载荷为：%.6f\n',C);
+fprintf('试验轴承国标基本额定动载为 %.6f\n',LRD);
+
+
+%%蒙特卡罗用于滚动轴承基本额定寿命和实际载荷工况的应力强度干涉可靠度(求多组概率寿命预测点)
+%%------------------------------------------------------------
+%【n=10000;】                           %实验一次的循环次数
+%【m=1000;】                            %%实验次数
+
+t=length(Pset);                      %%数组长度，双不确定性循环次数，多少个工况就循环多少次
+average_L=zeros(t,1);                %%预分配最终结果内存
+for u=1:t
+    l=zeros(n,1);
+    Y=zeros(m,1);
+    y=0;                             %%满足可靠度为r时的计数
+    x=0;                             %%累计的循环初始数值（取整）
+    q=10/m;                          %%累加系数
+    P=Pset(u);
+    figure('Name','当量动载的可靠度分布（应力-强度干涉+蒙特卡洛抽样+双不确定性）','Position',[(u-1)*1400/t 60 350 300]);
+    box on;
+for num=1:m
+    s=0;
+    Cn=normrnd(C,C*0.01,[1,n]);     %轴承的径向力服从标准正态分布,取变异系数0.01
+    Pn=normrnd(P,P*0.02,[1,n]);     %轴承的基本额定动载荷服从标准正态分布，取变异系数0.02
+    L=linspace(x,x,n);
+    for i=1:n
+     l(i)=(Cn(i)/Pn(i))^3;
+        if l(i)-L(i)>=0             %如果循环次数l（i）大于相应的循环次数则计数+1
+            s=s+1;
+        end
+    end
+    p=s/n;                          %可靠度概率
+    if abs(p-r)<0.03
+        Y(num)=L(i);
+        y=y+1;
+    end
+    xlabel('滚动轴承寿命r(10^6)');ylabel('可靠度');
+    plot(L(i),p,'g.');grid on;hold on;
+    shg;
+    hold on
+    x=x+q;                         %%用于比较的寿命循环次数+q（10^6）      
+    if p<0.00123                   %%节省运算时间早日跳出循环，反正只要取可靠度为r就行，图像也够好看了
+        break;            
+    end
+end
+    average_L(u)=(sum(Y))/y;
+    legend('当量动载的可靠度函数');
+    plot(average_L(u),r,'bo','LineWidth',1.5,'MarkerSize',12,'DisplayName','可靠度0.9');
+    fprintf('双不确定模型--可靠度:%.2f%%,当量动载荷:%.3fN时,预测寿命:%.3f(10^6r)\n',r*100,P,average_L(u));
+    
+end
+    y3=average_L;                             %%输出双不确定性模型所得数组
+    
+       
+%%寿命曲线对比--------------------------------------------------------------
+%【x_start=2500;】
+%【x_end=6000;】
+xi=6000:16000;
+y1=(LRD./xi).^3;                                              %%第一组查表国标所得寿命公式
+figure('Name','三组寿命预测曲线比对','Position',[550 80 500 340]);
+plot(y1,xi,'g','linewidth',3);hold on                       %%国标曲线为绿色
+a=polyfit(Pset,average_L,3);
+yi3=polyval(a,xi);
+plot(yi3,xi,'b','linewidth',3);hold on                      %%双不确定性工况拟合寿命预测点
+plot(y3,Pset,'o','Linewidth',3,'MarkerSize',5.5);grid on    %%双不确定性工况R=0.9点
+legend('标准寿命曲线','概率寿命曲线','R=0.9工况点');
+xlabel('滚动轴承寿命r(10^6)');ylabel('工况载荷');
+ax=gca;
+ax.Box='on';grid on;
+ax.LineWidth=3.5;  %Set the border thickness to X
+% Increase the font size of the axis tick labels
+ax.FontSize = 16;  % Set the desired font size
+shg;
+toc;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
